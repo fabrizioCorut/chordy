@@ -9,12 +9,29 @@
 -module(key).
 -author("fabi").
 
+% Defines the maximum number up to which, starting from 1, we want to generate a random number from.
+-define(MaximumHash, 1000000000).
+
 %% API
 -export([generate/0, between/3]).
 
+%%----------------------------------------------------------------------
+%% Function: generate/0
+%% Purpose: Generates a unique number that will serve as a key into a hash-table.
+%%----------------------------------------------------------------------
 generate() ->
-  rand:uniform(1000000000).
+  rand:uniform(?MaximumHash).
 
+%%----------------------------------------------------------------------
+%% Function: between/3
+%% Purpose: Determines whether a Key is found in the ring interval formed by From and To. It's excluse at the lower and inclusive at the higher end.
+%%          Ring interval is when the next element after the last, from a linear interval, is the first one, thus forming a ring.
+%%          e.g. ring containing numbers from 0 to 8. A valid interval can be : (4, 1].
+%% Args:    Key - To determine whether or not it's found between To and From.
+%%          To - Start of the interval.
+%%          From - End of the interval.
+%% Returns: true/ false.
+%%----------------------------------------------------------------------
 between(_, From, From) ->
   % Full circle. Return true.
   true;
