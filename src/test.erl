@@ -7,21 +7,44 @@
 
 %% Starting up a set of nodes is made easier using this function.
 
-start3() ->
-  First = start(node3),
-  test:start(node3, 1000, First),
-  Keys = test:keys(10000),
-  add(Keys, First),
-  test:check(Keys, First).
-
 start(Module) ->
     Id = key:generate(), 
     apply(Module, start, [Id]).
 
-
 start(Module, P) ->
     Id = key:generate(), 
     apply(Module, start, [Id,P]).    
+
+startProcesses(M, N) ->
+  Interval = N / M,
+  F = apply(node4, start, [1]),
+  startNumber(M-1, F, Interval, Interval),
+  timer:sleep(3000),
+  Keys = lists:seq(1,N),
+  add(Keys, F),
+  timer:sleep(1000),
+  check(Keys, F),
+  check(Keys, F),
+  check(Keys, F),
+  check(Keys, F),
+  F.
+
+startNumber(0, _, _, _) ->
+  ok;
+startNumber(M, F, CurrentInterval, Interval) ->
+  apply(node4, start, [CurrentInterval, F]),
+  startNumber(M-1, F, CurrentInterval + Interval, Interval).
+
+start1(N) ->
+  F = apply(node4, start, [1]),
+  Keys = lists:seq(1,N),
+  timer:sleep(2000),
+  add(Keys, F),
+  timer:sleep(1000),
+  check(Keys, F),
+  check(Keys, F),
+  check(Keys, F),
+  check(Keys, F).
 
 start(_, 0, _) ->
     ok;
@@ -78,6 +101,7 @@ check([Key|Keys], P, Failed, Timeout) ->
 	{error, _} -> 
 	    check(Keys, P, Failed, Timeout+1);
 	false ->
+    io:format("failed for key: ~p~n", [Key]),
 	    check(Keys, P, Failed+1, Timeout)
     end.
 

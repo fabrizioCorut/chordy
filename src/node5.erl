@@ -6,7 +6,7 @@
 %%% @end
 %%% Created : 03. Oct 2020 16:02
 %%%-------------------------------------------------------------------
--module(node4).
+-module(node5).
 -author("fabi").
 
 % Interval used to fire stabilization messages that trigger the start of the stabilization algorithm.
@@ -16,7 +16,10 @@
 -define(Timeout, 1000).
 
 % `true` if we should print to console every step.
--define(DEBUG, false).
+-define(DEBUG, true).
+
+% Amount of times we should retry a replication message.
+-define(TIMEOUT_TRIES, 3).
 
 %% API
 -export([start/1, start/2]).
@@ -213,9 +216,9 @@ node(Id, Predecessor, Successor, Next, Monitor, Storage, ReplicaStorage) ->
       % Recurse with the new storage.
       node(Id, Predecessor, Successor, Next, Monitor, MergedStorage, MergedReplica);
 
-    {replicate, Key, Value} ->
+    {replicate, Key, Value, ReqPid} ->
       % Add the Key-Value pair nevertheless.
-      NewReplica = storage:add(Key, Value, ReplicaStorage),
+      NewReplica = replicate(Key, Value, ReplicaStorage, ReqPid),
       % Recurse with the new storage capabilities.
       node(Id, Predecessor, Successor, Next, Monitor, Storage, NewReplica);
 
@@ -224,7 +227,6 @@ node(Id, Predecessor, Successor, Next, Monitor, Storage, ReplicaStorage) ->
     % Start going through the ring and see how much it takes us and the Nodes that we go through.
     probe ->
       debug_print("[~p]: probe: received request.~n", [self()]),
-      io:format("[~p]: handles ~p Key-Value pairs.~n", [self(), length(Storage)]),
       create_probe(Id, Successor),
       % Recurse.
       node(Id, Predecessor, Successor, Next, Monitor, Storage, ReplicaStorage);
@@ -239,7 +241,6 @@ node(Id, Predecessor, Successor, Next, Monitor, Storage, ReplicaStorage) ->
     % We've received a probe that has started from another Node. Just forward it.
     {probe, Ref, Nodes, Time} ->
       debug_print("[~p]: probe: forwarding request.~n", [self()]),
-      io:format("[~p]: handles ~p Key-Value pairs.~n", [self(), length(Storage)]),
       forward_probe(Ref, Nodes, Time, Id, Successor),
       % Recurse.
       node(Id, Predecessor, Successor, Next, Monitor, Storage, ReplicaStorage)
@@ -266,18 +267,50 @@ add(Key, Value, Qref, Client, Id, {PredecessorKey, _}, {_, SuccessorPid}, Storag
   case key:between(Key, PredecessorKey, Id) of
     % Yes. We should store the Value.
     true ->
-      % Inform the Client that we can handle his request.
-      Client ! {Qref, ok},
+      debug_print("[~p]: add: adding Key: ~p to self.~n", [self(), Key]),
       % Update the storage.
-      SuccessorPid ! {replicate, Key, Value},
-      % Inform the Successor of what Key-Value we're storing.
-      storage:add(Key, Value, Storage);
+      NewStorage = storage:add(Key, Value, Storage),
+      % Replicate the key.
+      Result = safe_replicate(SuccessorPid, Key, Value, ?TIMEOUT_TRIES),
+      % Inform the Client of whatever result we got form the replication.
+      % ok if it has succeeded, false if it has not.
+      Client ! {Qref, Result},
+      NewStorage;
 
     % No. Forward the request to our Successor.
     false ->
+      debug_print("[~p]: add: forwarding Key: ~p to Successor.~n", [self(), Key]),
       SuccessorPid ! {add, Key, Value, Qref, Client},
       % Return the same storage.
       Storage
+  end.
+
+%%----------------------------------------------------------------------
+%% Function: safe_replicate/4
+%% Purpose: Informs the Successor about the fact that he should replicate our Key-Values.
+%%          Wait for his ack, Tries number of times.
+%% Args:    SuccessorPid - Process identifier of our Successor.
+%%          Key - Key under which the Value should be put.
+%%          Value - The actual Value that we should store.
+%%          Tries - Number of times we should re-send the replicate message and expect an ack before we decide to abort the replication.
+%% Returns: ok if the replication was successful. false the Successor timed-out too many times.
+%%----------------------------------------------------------------------
+safe_replicate(SuccessorPid, Key, Value, Tries) ->
+  % Inform the Successor of what Key-Value we're storing.
+  SuccessorPid ! {replicate, Key, Value, self()},
+  receive
+    % Wait for an ack for the exact same key.
+    {ack, Key} ->
+      ok
+  after ?Timeout ->
+    % It the process did not reply by now, try to send it again
+    % if we still have tries left.
+    if
+      Tries == 0 ->
+        ok_but_unsafe;
+      true ->
+        safe_replicate(SuccessorPid, Key, Value, Tries-1)
+    end
   end.
 
 %%----------------------------------------------------------------------
@@ -311,6 +344,23 @@ lookup(Key, Qref, Client, Id, {PredecessorKey, _}, {_, SuccessorPid}, Storage) -
       SuccessorPid ! {lookup, Key, Qref, Client},
       ok
   end.
+
+%%----------------------------------------------------------------------
+%% Function: replicate/4
+%% Purpose: Updates the Replica storage and confirms back with the requester whether the addition was successful or not.
+%% Args:    Key - Key under which the Value should be put.
+%%          Value - The actual Value that we should store.
+%%          Replica - Holds the key-value pairs that we have replicated from our Predecessor.
+%%          RequestingPid - Process identifier of the process which requested the replica.
+%% Returns: ok.
+%%----------------------------------------------------------------------
+replicate(Key, Value, Replica, RequestingPid) ->
+  % Add the Key-Value pair nevertheless.
+  NewReplica = storage:add(Key, Value, Replica),
+  % Send back an ack that we've been able to replicate the Key-Value pair.
+  RequestingPid ! {ack, Key},
+  % Return back the updated Replica storage.
+  NewReplica.
 
 %% ------ Stabilize ------ %%
 
