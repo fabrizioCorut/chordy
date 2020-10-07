@@ -96,6 +96,7 @@ connect(_Id, Peer) ->
 %%          Next - Our Successor's Successor.
 %%          Monitor - Holds references to monitored processes.
 %%          Storage - Holds the key-value pairs that this Node is managing.
+%%          ReplicaStorage - Holds the key-value pairs that we have replicated from our Predecessor.
 %% Returns: ok.
 %%----------------------------------------------------------------------
 node(Id, Predecessor, Successor, Next, Monitor, Storage, ReplicaStorage) ->
@@ -253,7 +254,7 @@ node(Id, Predecessor, Successor, Next, Monitor, Storage, ReplicaStorage) ->
 %%          Qref - Unique identifier used to map the request to the response.
 %%          Client - Pid of the process that requested us to add the Key-Value pair..
 %%          Id - Should uniquely identify the process. Used for debugging purposes.
-%%          Predecessor - The Node that preceedes us in the Chord ring.
+%%          Predecessor - The Node that precedes us in the Chord ring.
 %%          Successor - The Node that follows us in the Chord ring.
 %%          Storage - Holds the key-value pairs that this Node is managing.
 %% Returns: Updated Storage containing the Key-Value pair..
@@ -281,12 +282,12 @@ add(Key, Value, Qref, Client, Id, {PredecessorKey, _}, {_, SuccessorPid}, Storag
 %% Function: lookup/7
 %% Purpose: Determines whether we handle the Key whose Value is requested or we should forward it to our Successor.
 %%          If we are to handle it, look-up the Value that is stored under the Key in our local Storage.
-%%          The value is communicated dirrectly to the Client.
+%%          The value is communicated directly to the Client.
 %% Args:    Key - Key whose value we're looking for.
 %%          Qref - Unique identifier used to map the request to the response.
 %%          Client - Pid of the process that requested us to lookup the Key-Value pair and which is expecting a response.
 %%          Id - Should uniquely identify the process. Used for debugging purposes.
-%%          Predecessor - The Node that preceedes us in the Chord ring.
+%%          Predecessor - The Node that precedes us in the Chord ring.
 %%          Successor - The Node that follows us in the Chord ring.
 %%          Storage - Holds the key-value pairs that this Node is managing.
 %% Returns: ok.
@@ -417,6 +418,7 @@ request(Peer, Predecessor, Successor) ->
 %%          Id - Should uniquely identify the process. Used for debugging purposes.
 %%          Predecessor - Our current Predecessor. The Node that precedes us in the Chord ring.
 %%          Storage - Holds the key-value pairs that this Node is managing.
+%%          ReplicatedStorage - Holds the key-value pairs that we have replicated from our Predecessor.
 %% Returns: {NewPredecessor, UpdatedStorage}.
 %%----------------------------------------------------------------------
 notify({NewPredecessorKey, _NewPredecessorPid} = PossiblePredecessor, Id, Predecessor, Storage, ReplicatedStorage) ->
@@ -457,9 +459,10 @@ notify({NewPredecessorKey, _NewPredecessorPid} = PossiblePredecessor, Id, Predec
 
 %%----------------------------------------------------------------------
 %% Function: handover/3
-%% Purpose: Splits the Key-Value Storage based on Id and NewPredecessorKey and sends the NewPredecessor his Key-Values.
+%% Purpose: Splits the Key-Value Storage and ReplicatedStorage based on Id and NewPredecessorKey and sends the NewPredecessor his Key-Values.
 %% Args:    Id - Should uniquely identify the process. Used for debugging purposes.
 %%          Storage - Holds the key-value pairs that this Node is managing.
+%%          ReplicatedStorage - Holds the key-value pairs that we have replicated from our Predecessor.
 %%          NewPredecessor - Our new Predecessor. The Node that preceedes us in the Chord ring.
 %% Returns: Updated Storage, without the values that our NewPredecessor now manages.
 %%----------------------------------------------------------------------
