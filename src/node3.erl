@@ -6,17 +6,17 @@
 %%% @end
 %%% Created : 03. Oct 2020 16:02
 %%%-------------------------------------------------------------------
--module(node2).
+-module(node3).
 -author("fabi").
 
 % Interval used to fire stabilization messages that trigger the start of the stabilization algorithm.
--define(Stabilize, 100).
+-define(Stabilize, 1000).
 
 % Amount of microseconds that we should wait for the ring joining message.
 -define(Timeout, 1000).
 
 % `true` if we should print to console every step.
--define(DEBUG, true).
+-define(DEBUG, false).
 
 %% API
 -export([start/1, start/2]).
@@ -60,7 +60,7 @@ init(Id, Peer) ->
   % Schedule the stabilization to happen between a certain interval of time.
   schedule_stabilize(),
   % Start the work.
-  node(Id, Predecessor, Successor, storage:create()).
+  node(Id, Predecessor, Successor, nil, monitor:create(), storage:create()).
 
 %%----------------------------------------------------------------------
 %% Function: connect/2
@@ -93,10 +93,12 @@ connect(_Id, Peer) ->
 %% Args:    Id - Should uniquely identify the process. Used for debugging purposes.
 %%          Predecessor - The Node that preceedes us in the Chord ring.
 %%          Successor - The Node that follows us in the Chord ring.
+%%          Next - Our Successor's Successor.
+%%          Monitor - Holds references to monitored processes.
 %%          Storage - Holds the key-value pairs that this Node is managing.
 %% Returns: ok.
 %%----------------------------------------------------------------------
-node(Id, Predecessor, Successor, Storage) ->
+node(Id, Predecessor, Successor, Next, Monitor, Storage) ->
   % Start reacting to incoming messages.
   receive
     % A new Node wants to connect to the Chord ring that we're part of.
@@ -105,7 +107,7 @@ node(Id, Predecessor, Successor, Storage) ->
       % Return our Id, so he can use it later on to determine his relative position to us.
       Peer ! {UniqueReference, Id},
       % Recurse.
-      node(Id, Predecessor, Successor, Storage);
+      node(Id, Predecessor, Successor, Next, Monitor, Storage);
 
     % Timer fired. Begin the stabilization algorithm by asking our Successor what his Predecessor is.
     % STABILIZE part 1.
@@ -114,36 +116,72 @@ node(Id, Predecessor, Successor, Storage) ->
       % Send him a request for his Predecessor.
       stabilize(Successor),
       % Recurse.
-      node(Id, Predecessor, Successor, Storage);
+      node(Id, Predecessor, Successor, Next, Monitor, Storage);
 
     % A Node needs to know our Predecessor.
     % STABILIZE part 2.
     {request, Peer} ->
       debug_print("[~p]: request: received from: ~p.~n", [self(), Peer]),
       % Inform the Node what our Predecessor is and wait for new information.
-      request(Peer, Predecessor),
+      request(Peer, Predecessor, Successor),
       % Recurse.
-      node(Id, Predecessor, Successor, Storage);
+      node(Id, Predecessor, Successor, Next, Monitor, Storage);
 
     % Our Successor informs us about the Predecessor that he's aware of.
     % STABILIZE part 3.
-    {status, SuccessorPredecessor} ->
+    {status, SuccessorPredecessor, SuccessorSuccessor} ->
       debug_print("[~p]: status: received SuccessorPredecessor as: ~p.~n", [self(), SuccessorPredecessor]),
       % Determine, based on his Predecessor, whether he should still be our Successor or not.
-      NewSuccessor = stabilize(SuccessorPredecessor, Id, Successor),
+      {NewSuccessor, NextSuccessor} = stabilize(SuccessorPredecessor, SuccessorSuccessor, Id, Successor),
       debug_print("[~p]: status: decided on NewSuccessor: ~p.~n", [self(), NewSuccessor]),
+      % Monitor our new Successor so we're aware of when he has crashed. Also, remove the monitoring
+      % for our old Successor.
+      UpdatedMonitor = monitor:remove(Successor, Monitor),
+      NewMonitor = monitor:add(NewSuccessor, UpdatedMonitor),
       % Recurse with the updated Successor.
-      node(Id, Predecessor, NewSuccessor, Storage);
+      node(Id, Predecessor, NewSuccessor, NextSuccessor, NewMonitor, Storage);
 
     % A new node informs us of its existence as our Predecessor.
     % STABILIZE part 4.
     {notify, PossiblePredecessor} ->
       debug_print("[~p]: notify: received: ~p.~n", [self(), PossiblePredecessor]),
       % Determine whether he is actually our predecessor or not.
-      NewPredecessor = notify(PossiblePredecessor, Id, Predecessor, Storage),
+      {NewPredecessor, NewStorage} = notify(PossiblePredecessor, Id, Predecessor, Storage),
       debug_print("[~p]: notify: decided on new predecessor: ~p.~n", [self(), NewPredecessor]),
+      % Monitor our new Predecessor so we're aware of when he has crashed. Also, remove the monitoring
+      % for our old Predecessor.
+      UpdatedMonitor = monitor:remove(Predecessor, Monitor),
+      NewMonitor = monitor:add(NewPredecessor, UpdatedMonitor),
       % Recurse with the updated Predecessor.
-      node(Id, NewPredecessor, Successor, Storage);
+      node(Id, NewPredecessor, Successor, Next, NewMonitor, NewStorage);
+
+    % One of the Nodes we're monitoring has crashed.
+    {'DOWN', Ref, process, _Object, _Reason} ->
+      case monitor:isValueOfNodeEqual(Ref, Successor, Monitor) of
+        % Our Successor has died.
+        true ->
+          % Remove it from the monitoring and add the next process to the monitoring.
+          UpdatedMonitor = monitor:remove(Successor, Monitor),
+          NewMonitor = monitor:add(Next, UpdatedMonitor),
+          % Start the stabilization algorithm
+          stabilize(Next),
+          % Recurse with the new values.
+          node(Id, Predecessor, Next, nil, NewMonitor, Storage);
+
+        false ->
+          % Check if our Predecessor has failed.
+          case monitor:isValueOfNodeEqual(Ref, Predecessor, Monitor) of
+            true ->
+              % De-monitor the Predecessor process.
+              NewMonitor = monitor:remove(Predecessor, Monitor),
+              % There's not much that we can do, set the Predecessor as nil and leave everything as is.
+              node(Id, nil, Successor, Next, NewMonitor, Storage);
+
+            false ->
+              % Unknown node, do nothing.
+              node(Id, Predecessor, Successor, Next, Monitor, Storage)
+          end
+      end;
 
     %% Storage related message handling.
 
@@ -152,7 +190,7 @@ node(Id, Predecessor, Successor, Storage) ->
       % Determine whether we should be forwarding the message or add it to our Storage.
       Added = add(Key, Value, Qref, Client, Id, Predecessor, Successor, Storage),
       % Recurse with the updated Storage.
-      node(Id, Predecessor, Successor, Added);
+      node(Id, Predecessor, Successor, Next, Monitor, Added);
 
     % We're requested to lookup a certain Value found at a certain Key.
     {lookup, Key, Qref, Client} ->
@@ -160,14 +198,14 @@ node(Id, Predecessor, Successor, Storage) ->
       % inform the Client of the Value.
       lookup(Key, Qref, Client, Id, Predecessor, Successor, Storage),
       % Recurse.
-      node(Id, Predecessor, Successor, Storage);
+      node(Id, Predecessor, Successor, Next, Monitor, Storage);
 
     % We're being handed over Values of our Successor.
     {handover, Elements} ->
       % Merge the values received with what we already have, overwriting any existing values/
       MergedStorage = storage:merge(Storage, Elements),
       % Recurse with the new storage.
-      node(Id, Predecessor, Successor, MergedStorage);
+      node(Id, Predecessor, Successor, Next, Monitor, MergedStorage);
 
     %%% DEBUG messages.
 
@@ -176,21 +214,21 @@ node(Id, Predecessor, Successor, Storage) ->
       debug_print("[~p]: probe: received request.~n", [self()]),
       create_probe(Id, Successor),
       % Recurse.
-      node(Id, Predecessor, Successor, Storage);
+      node(Id, Predecessor, Successor, Next, Monitor, Storage);
 
     % We've received back the message, so the ring is complete. Print the results.
     {probe, Id, Nodes, Time} ->
       debug_print("[~p]: probe: finished request.~n", [self()]),
       remove_probe(Time, Nodes),
       % Recurse.
-      node(Id, Predecessor, Successor, Storage);
+      node(Id, Predecessor, Successor, Next, Monitor, Storage);
 
     % We've received a probe that has started from another Node. Just forward it.
     {probe, Ref, Nodes, Time} ->
       debug_print("[~p]: probe: forwarding request.~n", [self()]),
       forward_probe(Ref, Nodes, Time, Id, Successor),
       % Recurse.
-      node(Id, Predecessor, Successor, Storage)
+      node(Id, Predecessor, Successor, Next, Monitor, Storage)
   end.
 
 %% ------ Storage ------ %%
@@ -211,7 +249,8 @@ node(Id, Predecessor, Successor, Storage) ->
 %%----------------------------------------------------------------------
 add(Key, Value, Qref, Client, Id, {PredecessorKey, _}, {_, SuccessorPid}, Storage) ->
   % Should we manage the Key? e.g. is the key between our Id and the one of the Predecessor?
-  case key:between(Key, Id, PredecessorKey) of
+  io:format("Checking Key: ~p, for (~p, ~p].~n", [Key, PredecessorKey, Id]),
+  case key:between(Key, PredecessorKey, Id) of
     % Yes. We should store the Value.
     true ->
       % Inform the Client that we can handle his request.
@@ -242,7 +281,7 @@ add(Key, Value, Qref, Client, Id, {PredecessorKey, _}, {_, SuccessorPid}, Storag
 %%----------------------------------------------------------------------
 lookup(Key, Qref, Client, Id, {PredecessorKey, _}, {_, SuccessorPid}, Storage) ->
   % Should we manage the Key? e.g. is the key between our Id and the one of the Predecessor?
-  case key:between(Key, Id, PredecessorKey) of
+  case key:between(Key, PredecessorKey, Id) of
     % Yes.
     true ->
       % Extract the value.
@@ -266,23 +305,26 @@ lookup(Key, Qref, Client, Id, {PredecessorKey, _}, {_, SuccessorPid}, Storage) -
 %% Args:    Successor - The Node that follows us in the Chord ring.
 %% Returns: ok.
 %%----------------------------------------------------------------------
+stabilize(nil) ->
+  ok;
 stabilize({_, SuccessorPid}) ->
   SuccessorPid ! {request, self()},
   ok.
 
 
 %%----------------------------------------------------------------------
-%% Function: stabilize/3
+%% Function: stabilize/4
 %% Purpose: We have received the Predecessor of our Successor. Determine whether this Predecessor should actually become
 %%          our new Successor or not. In either case, inform the new Successor (be it even the old one ~ unless it's this
 %%          current Node as its Predecessor, which means that the connection between us and the Successor is stable)
 %%          that we have him as our Successor.
 %% Args:    Predecessor - Predecessor of our current Successor. The node that precedes our Successor in the Chord ring.
+%%          SuccessorSuccessor - Successor of our current Successor.
 %%          Id - Should uniquely identify the process. Used for debugging purposes.
 %%          Successor - Our current Successor. The Node that follows us in the Chord ring.
 %% Returns: A new Successor node.
 %%----------------------------------------------------------------------
-stabilize(Predecessor, Id, {SuccessorKey, SuccessorPid} = Successor) ->
+stabilize(Predecessor, SuccessorSuccessor, Id, {SuccessorKey, SuccessorPid} = Successor) ->
   Self = self(),
   % Determine who is this Predecessor.
   case Predecessor of
@@ -292,7 +334,7 @@ stabilize(Predecessor, Id, {SuccessorKey, SuccessorPid} = Successor) ->
       % Inform our Successor that we're his Predecessor.
       SuccessorPid ! {notify, {Id, Self}},
       % Return the same Successor since our connection is now stable.
-      Successor;
+      {Successor, SuccessorSuccessor};
 
     % Our has as its Predecessor himself. The stabilize algorithm has been performed with only himself in the ring.
     % So his Predecessor has ultimately become himself as well. Make sure that the Successor is not in fact ourselves,
@@ -302,7 +344,7 @@ stabilize(Predecessor, Id, {SuccessorKey, SuccessorPid} = Successor) ->
       % Inform our Successor that we're his Predecessor.
       SuccessorPid ! {notify, {Id, Self}},
       % Return the same Successor since our connection is now stable.
-      Successor;
+      {Successor, SuccessorSuccessor};
 
     % Our has as its Predecessor himself. The stabilize algorithm has been performed with only himself in the ring.
     % So his Predecessor has ultimately become himself as well. Since we tested in the previous case that Self /= SuccessorPid
@@ -310,14 +352,14 @@ stabilize(Predecessor, Id, {SuccessorKey, SuccessorPid} = Successor) ->
     {SuccessorKey, _} ->
       debug_print("[~p]: stabilize: self predecessor.~n", [self()]),
       % Do nothing and return our current Successor.
-      Successor;
+      {Successor, SuccessorSuccessor};
 
     % The Successor has the current Node as his Predecessor. We have him as a Successor, then the connection between us
     % is stable.
     {Id, _} ->
       debug_print("[~p]: stabilize: correct predecessor.~n", [self()]),
       % Do nothing and return our current Successor.
-      Successor;
+      {Successor, SuccessorSuccessor};
 
     % Our Successor has a different Predecessor.
     {PredecessorKey, PredecessorPid} ->
@@ -330,7 +372,7 @@ stabilize(Predecessor, Id, {SuccessorKey, SuccessorPid} = Successor) ->
           % Inform our new Successor that we're considering him our Successor.
           PredecessorPid ! {notify, {Id, Self}},
           % Return our new Successor
-          Predecessor;
+          {Predecessor, Successor};
 
         % His Predecessor is out of the bounds defined by us and our Successor.
         false ->
@@ -338,39 +380,40 @@ stabilize(Predecessor, Id, {SuccessorKey, SuccessorPid} = Successor) ->
           % Inform our Successor that we're his Predecessor.
           SuccessorPid ! {notify, {Id, Self}},
           % Return the same Successor.
-          Successor
+          {Successor, SuccessorSuccessor}
       end
   end.
 
 %%----------------------------------------------------------------------
-%% Function: request/2
+%% Function: request/3
 %% Purpose: Handles a stabilization request from a Peer. Will inform the Peer of our current Predecessor.
 %% Args:    Peer - Pid of the Node that requested information about our Predecessor.
-%%          Predecessor - The Node that preceedes us in the Chord ring.
+%%          Predecessor - The Node that precedes us in the Chord ring.
+%%          Successor - The node the succeeds us in the Chord ring.
 %% Returns: ok.
 %%----------------------------------------------------------------------
-request(Peer, Predecessor) ->
-  Peer ! {status, Predecessor},
+request(Peer, Predecessor, Successor) ->
+  Peer ! {status, Predecessor, Successor},
   ok.
 
 %%----------------------------------------------------------------------
-%% Function: notify/4
+%% Function: notify/5
 %% Purpose: Handles a notification from a possible Predecessor that we're being considered his Successor.
 %%          If this possible Predecessor is actually our new Predecessor, we should split the Key-Value Storage with him based
 %%          on its Key.
 %% Args:    PossiblePredecessor - A possible Node that has set us as his Successor. We should verify that this is accurate.
 %%          Id - Should uniquely identify the process. Used for debugging purposes.
-%%          Predecessor - Our current Predecessor. The Node that preceedes us in the Chord ring.
+%%          Predecessor - Our current Predecessor. The Node that precedes us in the Chord ring.
 %%          Storage - Holds the key-value pairs that this Node is managing.
 %% Returns: {NewPredecessor, UpdatedStorage}.
 %%----------------------------------------------------------------------
-notify({NewPredecessorKey, NewPredecessorPid} = PossiblePredecessor, Id, Predecessor, Storage) ->
+notify({NewPredecessorKey, _NewPredecessorPid} = PossiblePredecessor, Id, Predecessor, Storage) ->
   case Predecessor of
     % We don't have a Predecessor yet.
     nil ->
       debug_print("[~p]: notify: nil Predecessor: ~p.~n", [self(), Predecessor]),
       % Inform our Predecessor that he is our Predecessor now.
-      request(NewPredecessorPid, PossiblePredecessor),
+      % request(NewPredecessorPid, PossiblePredecessor, Successor),
       % Handover the Key-Value storage between us and our new Predecessor based on our Keys.
       Keep = handover(Id, Storage, PossiblePredecessor),
       % Return this new Predecessor and the values that we're managing now.
@@ -384,7 +427,7 @@ notify({NewPredecessorKey, NewPredecessorPid} = PossiblePredecessor, Id, Predece
         true ->
           debug_print("[~p]: notify: new Predecessor: ~p.~n", [self(), PossiblePredecessor]),
           % Inform our Predecessor that he is our Predecessor now.
-          request(NewPredecessorPid, PossiblePredecessor),
+          % request(NewPredecessorPid, PossiblePredecessor, Successor),
           % Handover the Key-Value storage between us and our new Predecessor based on our Keys.
           Keep = handover(Id, Storage, PossiblePredecessor),
           % Return this new Predecessor and the values that we're managing now.
@@ -394,7 +437,7 @@ notify({NewPredecessorKey, NewPredecessorPid} = PossiblePredecessor, Id, Predece
         false ->
           debug_print("[~p]: notify: same Predecessor: ~p.~n", [self(), PossiblePredecessor]),
           % Inform the NewProcessorPid of our actual Predecessor so he can re-evaluate his algorithm.
-          request(NewPredecessorPid, Predecessor),
+          % request(NewPredecessorPid, Predecessor, Successor),
           % Return the same Predecessor and Storage.
           {Predecessor, Storage}
       end
@@ -422,7 +465,7 @@ handover(Id, Storage, {NewPredecessorKey, NewPredecessorPid}) ->
 %% Returns: ok.
 %%----------------------------------------------------------------------
 schedule_stabilize() ->
-  % Send message insted of calling a specific method with parameters so we can trace it better.
+  % Send message instead of calling a specific method with parameters so we can trace it better.
   timer:send_interval(?Stabilize, self(), stabilize),
   ok.
 
@@ -432,7 +475,7 @@ schedule_stabilize() ->
 %% Function: create_probe/2
 %% Purpose: Starts sending a probe message to our Successor.
 %% Args:    Id - Should uniquely identify the process. Used for debugging purposes.
-%%          Successor - The node the succeedes us in the Chord ring.
+%%          Successor - The node the succeeds us in the Chord ring.
 %% Returns: ok.
 %%----------------------------------------------------------------------
 create_probe(Id, {_SuccessorKey, SuccessorPid}) ->
@@ -454,7 +497,7 @@ remove_probe(Time, Nodes) ->
   % Calculate the time by subtracting the start time.
   RoundTripTime = erlang:system_time(micro_seconds) - Time,
   % Print the information to the console.
-  debug_print("RoundTrip time: ~p. Passed through: ~p.~n", [RoundTripTime, Nodes]).
+  io:format("RoundTrip time: ~p. Passed through: ~p.~n", [RoundTripTime, Nodes]).
 
 %%----------------------------------------------------------------------
 %% Function: forward_probe/5

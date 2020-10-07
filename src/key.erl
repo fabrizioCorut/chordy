@@ -2,7 +2,7 @@
 %%% @author fabi
 %%% @copyright (C) 2020, <COMPANY>
 %%% @doc
-%%%
+%%% Representation of a potential hash. Ideally unique everytime generate is called, within a bound.
 %%% @end
 %%% Created : 03. Oct 2020 15:51
 %%%-------------------------------------------------------------------

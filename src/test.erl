@@ -7,6 +7,13 @@
 
 %% Starting up a set of nodes is made easier using this function.
 
+start3() ->
+  First = start(node3),
+  test:start(node3, 1000, First),
+  Keys = test:keys(10000),
+  add(Keys, First),
+  test:check(Keys, First).
+
 start(Module) ->
     Id = key:generate(), 
     apply(Module, start, [Id]).
@@ -44,7 +51,6 @@ lookup(Key, Node) ->
 	    {error, "timeout"}
     end.
 
-
 %% This benchmark can be used for a DHT where we can add and lookup
 %% key. In order to use it you need to implement a store.
 
@@ -58,8 +64,8 @@ check(Keys, P) ->
     T1 = now(),
     {Failed, Timeout} = check(Keys, P, 0, 0),
     T2 = now(),
-    Done = (timer:now_diff(T2, T1) div 1000),
-    io:format("~w lookup operation in ~w ms ~n", [length(Keys), Done]),
+    Done = timer:now_diff(T2, T1),
+    io:format("~w lookup operation in ~w microseconds ~n", [length(Keys), Done]),
     io:format("~w lookups failed, ~w caused a timeout ~n", [Failed, Timeout]).
 
 

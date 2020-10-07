@@ -27,14 +27,14 @@ create() ->
 %%          Storage - Current Storage.
 %% Returns: Updated Storage containing the new Key-Value pair..
 %%----------------------------------------------------------------------
-add(_Key, _Value, []) ->
-  [];
+add(Key, Value, []) ->
+  [{Key, Value}];
 add(Key, Value, [{HeadKey, _HeadValue} = Head | T]) when Key < HeadKey ->
   % Change the key to inf so Key < HeadKey will never be satisfied.
-  [{Key, Value}, Head | add(inf, Value, T)];
+  [{Key, Value}, Head | T];
 add(Key, Value, [{HeadKey, _HeadValue} | T]) when Key == HeadKey ->
   % Replace the existing.
-  [{Key, Value} | add(inf, Value, T)];
+  [{Key, Value} | T];
 add(Key, Value, [H | T]) ->
   [H | add(Key, Value, T)].
 
